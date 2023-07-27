@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
     	'medfilt': 15,
     	'offset_threshold': 10,
     	'spline': False,
-        'score_threshold': 0.05,
+        'score_threshold': 0.5,
         'multiprocessing': False,
         'n_back': 4,
     },
@@ -67,7 +67,8 @@ DEFAULT_CONFIG = {
         'scale_length_weak': 0.5,
         'reproj_error_threshold': 15,
         'n_deriv_smooth': 1,
-        'reproj_loss': 'soft_l1'
+        'reproj_loss': 'soft_l1',
+        'score_threshold': 0.5,
     },
 }
 
