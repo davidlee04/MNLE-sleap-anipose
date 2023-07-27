@@ -1,31 +1,29 @@
 # Generic imports
-from os import listdir
-from os.path import join, split, exists, dirname
-import numpy as np 
-import matplotlib.pyplot as plt 
+
+import numpy as np
 import h5py
 import re
-from scipy.io import savemat
 import importlib
 import h5py
 import shutil
-from IPython.utils import io
 import toml
+
+from os import listdir, mkdir, rename
+from os.path import join, split, exists, dirname
+
+from scipy.io import savemat
 
 # Custom libraries 
 spec = importlib.util.find_spec('aniposelib')
 if spec is None:
 	print("aniposelib is not installed")
 #     !python -m pip install --user aniposelib
-from aniposelib.cameras import CameraGroup
+
 from preprocessing import get_2d_poses, get_point_scores
-from aniposelib.utils import load_pose2d_fnames
-from triangulation_v3 import TriangulationMethod, get_3d_poses
+from triangulation_v3 import get_3d_poses
 from filter import get_filter_poses
 from calibration import generate_calibration
 from convert import convert_slp_to_h5
-
-from os import mkdir, rename
 
 config = dict()
 cam_names = []
@@ -74,10 +72,16 @@ DEFAULT_CONFIG = {
 }
 
 def process_config(project_directory):
+	"""
+	Loads config.toml from project_directory
+
+	Args:
+		project_directory: file path of directory containing config.toml
+	"""
 	global config
 
 	if not exists(project_directory):
-		print('invalid directory') # to change
+		print('invalid directory')
 		return
 
 	if not exists(join(project_directory, 'config.toml')):
@@ -92,18 +96,14 @@ def process_config(project_directory):
 		print('error loading config.toml') # to change
 		return
 
+	# Reject config.toml without a 'path' key
 	if 'path' not in loaded_config:
 		print('session path not specified') # to change
 		return
 
-	"""Loads config object (dict).
-
-	Args:
-		passed_config: Dictionary representing config file
-	"""
-	
 	config = loaded_config
 
+	# Load default values from DEFAULT_CONFIG for omitted values in config.toml
 	for key, value in DEFAULT_CONFIG.items():
 		if key not in config:
 			config[key] = value
@@ -116,17 +116,18 @@ def process_config(project_directory):
 
 def process_files():
 	"""File preprocessing."""
+
 	global cam_names
 	print(config['path'])
-	# Generate file paths
 
-	# Generate list of .h5 files in session_filepath
-	
-	print('Read files from session path')
+	if not exists(join(config['path'],'predictions')):
+		print('error, predictions directory does not exist')
+		return
 
 	calibration_folder = config['path']+'/../calibration'
 	calibration_toml_path = join(calibration_folder, 'calibration.toml')
 
+	# During file preprocessing, attempt to load cam_names from calibration.toml if exists
 	if exists(calibration_toml_path):
 		try:
 			calibration_toml = toml.load(calibration_toml_path)
@@ -143,29 +144,41 @@ def process_files():
 			return
 
 def convert():
+	"""Calls convert function with config parameters."""
 	convert_slp_to_h5(config)
 
 def calibrate():
+	"""
+	Creates calibration.toml according to calibration videos.
+
+	There should exist a calibration.toml by the end of this function.
+	Also loads cam_names from calibration.toml.
+	"""
+
 	global cam_names
 	path = config['path']
 	calibration_folder = path+'/../calibration'
 	cal_toml_file = join(calibration_folder, 'calibration.toml')
 
 	cam_names_regex_patterns = {
-		'letter': r'Cam([A-Za-z])',
-		'number': r'Cam([\d+])'
+		'letter': r'Cam[A-Za-z]',
+		'number': r'Cam[\d+]'
 	}
 
+	# Choosing regex pattern based on user inputs from config.toml
 	if 'cam_naming' in config['calibration']:
 		config['calibration']['cam_regex'] = cam_names_regex_patterns[config['calibration']['cam_naming']]
 	elif 'cam_regex' not in config['calibration']:
 		print('error, can\'t find cam_regex or cam_naming field')
 		return
-		
-	generate_calibration(config)
-	
 
+	# calibration.toml creation
+	generate_calibration(config)
+
+	# Sanity check
 	assert exists(cal_toml_file), 'error, calibration.toml not found'
+
+	# Loads cam_names from calibration.toml file
 	try:
 		cal_toml = toml.load(cal_toml_file)
 		cam_names = []
@@ -177,20 +190,23 @@ def calibrate():
 		print('error loading calibration.toml file') # to change
 
 def filter_poses():
+	"""Generate filtered .h5 files by applying 2D filters."""
+
 	predictions_h5_directory = config['path']+'/predictions_h5'
-	# h5_regex = re.compile('.*Cam.*.h5', re.IGNORECASE)
-	# file_list = list(filter(h5_regex.match, listdir(predictions_h5_directory)))
 
 	camera_ids = cam_names
 	print(f'CAMERA NAMES {camera_ids}')
 
+	# Get all .h5 files in predictions_h5 that have our first camera name
+	# e.g. asdf_Cam0_1234.h5
 	cam1_regex = re.compile(f'.*{camera_ids[0]}.*.h5')
 	cam1_file_list = list(filter(cam1_regex.match, listdir(predictions_h5_directory)))
 
-	# Loop through 'Cam0' files
+	# Separately analyze each trial
 	for cam1_file in cam1_file_list:
 
-	    # Get files for camera group (cam1,2,3) for a given trial
+	    # Each video from each camera for a given trial
+	    # e.g. [asdf_Cam0_1234.h5, asdf_Cam1_1234.h5, asdf_Cam2_1234.h5] 
 	    camera_group = [cam1_file.replace(camera_ids[0], cname) for cname in camera_ids]
 
 	    """Get 2D data."""
@@ -201,28 +217,51 @@ def filter_poses():
 	    	pose2d = get_2d_poses(join(predictions_h5_directory, cam_file))
 	    	
 	    	n_frames, n_nodes, _, n_tracks = pose2d.shape
-	    	# p2d = np.copy(pose2d).reshape(n_frames, n_nodes, 1, 2)
+	    	
+	    	# Reshaping for get_filter_poses
 	    	pose2d = pose2d.reshape(n_frames, n_nodes, 1, 2)
 
+	    	# Prediction scores for each point
 	    	point_scores = get_point_scores(join(predictions_h5_directory, cam_file))
-	    	
-	    	# point_scores = point_scores.reshape(n_frames, n_nodes, 1)
 
 	    	filtered_points, filtered_scores = get_filter_poses(config, pose2d, point_scores)
-	    	filtered_scores = filtered_scores.reshape(n_frames, n_nodes, 1)
 
+	    	# Reshaping for exporting back to .h5
 	    	filtered_points = filtered_points.reshape(n_frames, n_nodes, 2, 1)
-	    	# split on .
+	    	filtered_scores = filtered_scores.reshape(n_frames, n_nodes, 1)
+	    	
+	    	# Append '_filtered' to end of file name
 	    	ind = cam_file.find('.h5')
+	    	# Sanity check
 	    	assert ind != -1, 'not an h5!'
 	    	out_file = cam_file[0:ind]+'_filtered'+cam_file[ind:]
-	    	save_as_h5(predictions_h5_directory, cam_file, out_file, filtered_points, filtered_scores)
+	    	to_filtered_h5(predictions_h5_directory, cam_file, out_file, filtered_points, filtered_scores)
 
-def save_as_h5(original_directory, original_file, filter_file, points, scores):
+def to_filtered_h5(original_directory, original_file, filter_file, points, scores):
+	"""
+	Generates new .h5 file with filtered points and scores.
+
+	Copies original .h5 in original_directory/original_file to filter_file
+	and updates it with filtered points and scores.
+	Helper function to filter_poses().
+
+	Args:
+		original_directory: directory containing original_file
+		original_file: original .h5 file
+		filter_file: new filtered .h5 file
+		points: filtered points
+		scores: filtered scores
+	"""
+
+	# Save to 'predictions_filtered_h5' directory
 	filter_directory = join(config['path'],'predictions_filtered_h5')
 	if not exists(filter_directory):
 		mkdir(filter_directory)
+
+	# Copying original .h5 to new location
 	shutil.copyfile(join(original_directory, original_file), join(filter_directory, filter_file))
+
+	# Overwrite new .h5 with updated filtered points/scores
 	with h5py.File(join(filter_directory, filter_file), 'r+') as f:
 		points = points.T
 		scores = scores.T
@@ -232,17 +271,13 @@ def save_as_h5(original_directory, original_file, filter_file, points, scores):
 		h5_scores[...] = scores
 
 def triangulate_poses():
-	"""Goes through cameras (as .h5 files) and triangulates 3D positions.
+	"""Triangulates 3D poses as .mat files from .h5 files."""
 
-	Args:
-		calibration_file: String specifying file path of calibration.toml
-		session_filepath: String specifying file path of camera prediction files
-		session_name: String specifying folder name of camera prediction files
-		save_filepath: String specifying file path of output matrices
-		file_list: List of camera prediction files
-	"""
 	camera_ids = cam_names
+
 	assert config is not {}, 'empty config'
+
+	# Run analysis on filtered data if directory exists, otherwise on raw data
 	session_directory = join(config['path'], 'predictions_h5')
 	# h5_regex = re.compile('.*Cam.*.h5', re.IGNORECASE)
 	# file_list = list(filter(h5_regex.match, listdir(session_filepath)))
@@ -250,29 +285,28 @@ def triangulate_poses():
 		session_directory = join(config['path'], 'predictions_filtered_h5')
 
 	print(f'SESSION DIRECTORY {session_directory}')
-
 	print(f'CAMERA NAMES {camera_ids}')
 
 	calibration_file = config['path']+'/../calibration/calibration.toml'
 	print(f'CALIBRATION FILE {calibration_file}')
 
 	_, session_name = split(session_directory)
-	print(f'SESSION_NAME {session_name}')
 
+	# Output to pose3d directory
 	save_filepath = join(config['path'], 'pose3d')
-
-	# Make directory if doesn't exist
 	if not exists(save_filepath):
 		mkdir(save_filepath)
 
-	# Generate list of 'Cam0' files (cam1_file_list)
-
+	# Get all .h5 files that have our first camera name
+	# e.g. asdf_Cam0_1234.h5
 	cam1_regex = re.compile(f'.*{camera_ids[0]}.*.h5')
 	cam1_file_list = list(filter(cam1_regex.match, listdir(session_directory)))
 
-	# Loop through 'Cam0' files
+	# Separately analyze each trial
 	for cam1_file in cam1_file_list:
-	    # Get files for camera group (cam1,2,3) for a given trial
+
+	    # Each video from each camera for a given trial
+	    # e.g. [asdf_Cam0_1234.h5, asdf_Cam1_1234.h5, asdf_Cam2_1234.h5] 
 	    cam_group = [cam1_file.replace(camera_ids[0], cname) for cname in camera_ids]
 
 	    print(f'Processing {cam_group}')
@@ -296,23 +330,18 @@ def triangulate_poses():
 	    
 	    n_cams, n_frames, n_nodes, _, n_tracks = pose2d.shape
 
-	    # Thresholding with score_threshold
-	    
-	    # get point_scores from .h5
-	    point_scores = [get_point_scores(join(session_directory, cam_file)) for cam_file in cam_group]
-	    # stack cameras on top of each other 3 x tracks x nodes x 1 (already technically this dimension... turn to nparray)
-	    # matching line 277
-	    point_scores = np.stack(point_scores, axis=0)[:, :]
+	    """Thresholding with score_threshold"""
 
+	    point_scores = [get_point_scores(join(session_directory, cam_file)) for cam_file in cam_group]
+	    # stack cameras on top of each other 3 x tracks x nodes x 1
+	    # (already technically this dimension... turn to nparray?)
+	    # honestly just matching what was done for pose2d
+	    point_scores = np.stack(point_scores, axis=0)[:, :]
 	    point_scores = point_scores.reshape(n_cams, n_frames, n_nodes)
 
-	    # get indices where point_scores < score_threshold
-	    # filtered = point_scores.reshape(n_cams*n_frames*n_nodes*2*n_tracks)
+	    # Turns indices in pose2d with corresponding scores below score_threshold to nan
 	    bad = point_scores < config['triangulation']['score_threshold']
-
-	    # turn corresponding indices in pose2d to np.nan
 	    pose2d[bad] = np.nan
-	    print(f'POSE2d SHAPE {pose2d.shape}')
 
 	    """Get 3D data from triangulation."""
 	    """Aniposelib gives us the option to triangulate with the direct linear transformation (DLT) or with RANSAC,
@@ -321,29 +350,16 @@ def triangulate_poses():
 	    of the reprojection error.
 	    def get_3d_poses(
 	                    poses_2d: list,
-	                    camera_mats: list = [],
 	                    calibration_filepath: str = None,
-	                    triangulate: TriangulationMethod = TriangulationMethod.simple,
-	                    refine_calibration: bool = False,
-	                    show_progress: bool = False
+	                    config: dict
 	                    ) -> np.ndarray
 	    Args:
 	        poses_2d: A length # cameras list of pose matrices for a single animal. Each pose matrix is of 
 	        shape (# frames, # nodes, 2, # tracks).
-	        
-	        camera_mats: A length # cameras list of camera matrices. Each camera matrix is a (3,4) ndarray. 
-	        Note that the camera matrices and pose_2d matrices have to be ordered in a corresponding fashion.
-	        or
-	        calibration_filepath: Filepath to calibration.toml
 
-	        triangulate: Triangulation method
-	            - simple
-	            - calibrated_dtl
-	            - calibrated_ransac
+	        calibration_filepath: Filepath to calibration.toml.
 
-	        refine_calibration: bool = False, Use CameraGroup.optim refinement
-
-	        show_progress: bool = False, Show progress of calibration
+	        config: Dictionary with user parameters for triangulation.
 	        
 	    Returns:
 	        poses_3d: A (# frames, # nodes, 3, # tracks) that corresponds to the triangulated 3D points in the world frame. 
@@ -355,14 +371,15 @@ def triangulate_poses():
 	                    calibration_filepath=calibration_file,
 	                    config=config)
 
-	    print(errors.shape)
-
 	    # Save as .mat to save_filepath
 	    trial_name = cam1_file
 	    save_as_mat(session_name, trial_name, marker_names, video_files, pose3d, save_filepath, errors)
 
 def save_as_mat(session_name, trial_name, marker_names, video_files, pose3d, save_filepath, errors):
-	"""Save pose3d data to .mat file in save_filepath.
+	"""
+	Save pose3d data to .mat file.
+
+	Helper function to triangulate_poses().
 	"""
 	mat_dict = {'session': session_name,
 	            'trial': trial_name.replace('.h5', ''),

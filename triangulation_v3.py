@@ -59,19 +59,9 @@ def get_3d_poses(
         poses_2d: A length # cameras list of pose matrices for a single animal. Each pose matrix is of 
         shape (# frames, # nodes, 2, # tracks).
         
-        camera_mats: A length # cameras list of camera matrices. Each camera matrix is a (3,4) ndarray. 
-        Note that the camera matrices and pose_2d matrices have to be ordered in a corresponding fashion.
-        or
-        calibration_filepath: Filepath to calibration.toml
+        calibration_filepath: Filepath to calibration.toml.
 
-        triangulate: Triangulation method
-            - simple: No other options are required
-            - calibrated_dtl: refine_calibration, show_progress can be passed
-            - calibrated_ransac: refine_calibration, show_progress can be passed
-
-        refine_calibration: bool = False, Use CameraGroup.optim refinement
-
-        show_progress: bool = False, Show progress of calibration
+        config: Dictionary with user parameters for triangulation.
         
     Returns:
         poses_3d: A (# frames, # nodes, 3, # tracks) that corresponds to the triangulated 3D points in the world frame. 
@@ -82,28 +72,31 @@ def get_3d_poses(
 
     assert config is not {}, 'empty config'
 
+    assert calibration_filepath is not None, 'calibration_filepath missing'
+
     cfg_tri = config['triangulation']
 
     ransac = cfg_tri['ransac']
-    refine_calibration = cfg_tri['optim']
+    optim = cfg_tri['optim']
     show_progress = cfg_tri['progress']
     errors = []
     
     # Filling poses_3d with triangulated points
     for track in range(n_tracks):
         points = poses_2d[..., track]
-        assert calibration_filepath is not None, 'calibration_filepath missing'
+        
         cgroup = CameraGroup.load(calibration_filepath)
 
         n_cams, n_frames, n_joints, _ = points.shape
 
+        # DLT vs RANSAC
         if not ransac:
             points_shaped = points.reshape(n_cams, n_frames*n_joints, 2)
             cgroup = CameraGroup.load(calibration_filepath)
             points_3d = cgroup.triangulate(points_shaped, progress = show_progress)
             points_3d = points_3d.reshape((n_frames, n_joints, 3))
-            
         else:
+            # RANSAC has errors output
             n_cams, n_frames, n_joints, _ = points.shape
             points_shaped = points.reshape(n_cams, n_frames*n_joints, 2)
             points_3d, _, _, err = cgroup.triangulate_ransac(
@@ -113,7 +106,8 @@ def get_3d_poses(
             err = err.reshape((n_frames, n_joints))
             errors.append(err)
 
-        if refine_calibration:
+        # optim parameter
+        if optim:
             kwargs = {
                 'scale_smooth': cfg_tri['scale_smooth'], 
                 'scale_length': cfg_tri['scale_length'],
@@ -129,8 +123,10 @@ def get_3d_poses(
 
         poses_3d.append(points_3d)
     
+    # Reshaping, putting track dimension at end
     poses_3d = np.stack(poses_3d, axis=-1)
-    if len(errors)!=0:
+    # Do the same for errors if ransac
+    if ransac:
         errors = np.stack(errors, axis=-1)
     else:
         errors = np.array(errors)
