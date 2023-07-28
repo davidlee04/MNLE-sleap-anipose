@@ -109,4 +109,4 @@ def generate_calibration(config):
 	cgroup.metadata['error'] = error.item()
 
 	# change output directory to calibration folder
-	cgroup.dump(join(session_path, 'calibration.toml'))
+	cgroup.dump(join(calibration_folder, 'calibration.toml'))
