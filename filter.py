@@ -1,5 +1,8 @@
 from tqdm import tqdm
 import numpy as np
+import statsmodels.api as sm
+import sleap
+import tensorflow as tf
 from numpy import array as arr
 from scipy import signal, stats
 from scipy.interpolate import splev, splrep
@@ -110,12 +113,13 @@ def viterbi_path_wrapper(args):
     pts_new, scs_new = viterbi_path(pts, scs, max_offset, thres_dist)
     return jix, pts_new, scs_new
 
-def filter_pose_viterbi(config, points_full, scores_full):
-    n_frames, n_joints, n_possible, _ = points_full.shape
+def viterbi(config, all_points):
+    n_frames, n_joints, n_possible, _ = all_points.shape
 
-    # points_full = all_points[:, :, :, :2]
-    # scores_full = all_points[:, :, :, 2]
-    
+    points_full = all_points[:, :, :, :2]
+    scores_full = all_points[:, :, :, 2]
+    print(all_points.shape)
+    print(all_points)
 
     points_full[scores_full < config['filter']['score_threshold']] = np.nan
 
@@ -147,6 +151,43 @@ def filter_pose_viterbi(config, points_full, scores_full):
     pool.join()
 
     return points, scores
+
+def filter_pose_viterbi(config, points_full, scores_full):
+    assert 'slp_model' in config, 'need slp_model key in config'
+    predictor = sleap.load_model(config['slp_model'])
+    predictor.inference_model.single_instance_layer.return_confmaps = True
+    output_stride = predictor.confmap_config.model.heads.single_instance.output_stride
+
+    video = sleap.load_video(R'D:\AN_local\AN664\041023\cam0\Cam00_230410_142351.avi')
+    imgs = video[0:15000]
+
+    predictions = predictor.inference_model.predict(imgs)
+    confmaps = predictions['confmaps']
+    print(confmaps.shape)
+
+    all_res = get_topk(confmaps, config['filter']['nkey'], output_stride)
+    print(all_res.shape) # frames x bodyparts x nkey x 3
+
+    return viterbi(config, all_res)
+
+def get_topk(confmaps, k, output_stride):
+    all_res = []
+    for i in range(confmaps.shape[0]):
+        res_i = []
+        for j in range(confmaps.shape[-1]):
+            cm = confmaps[i,:,:,j]
+            peaks = tf.math.top_k(tf.reshape(cm,[-1]),k=k)
+            inds = peaks.indices
+            vals = peaks.values.numpy()
+            subs = tf.unravel_index(inds, cm.shape)
+            subs = subs.numpy().astype('float32')
+            x = subs[1,:] * output_stride
+            y = subs[0,:] * output_stride
+            res_i.append([x,y,vals])
+        all_res.append(np.stack(res_i, axis=0))
+    all_res = np.stack(all_res, axis=0)
+    all_res = np.transpose(all_res, (0,1,3,2))
+    return all_res
 
 def filter_pose_medfilt(config, points_full, scores_full):
     n_frames, n_joints, n_possible, _ = points_full.shape
@@ -196,10 +237,104 @@ def filter_pose_medfilt(config, points_full, scores_full):
 
     return points, scores
 
+def convertparms2start(pn):
+    """Creating a start value for sarimax in case of an value error
+    See: https://groups.google.com/forum/#!topic/pystatsmodels/S_Fo53F25Rk"""
+    if "ar." in pn:
+        return 0
+    elif "ma." in pn:
+        return 0
+    elif "sigma" in pn:
+        return 1
+    else:
+        return 0
+
+def FitSARIMAXModel(x, p, pcutoff, alpha, ARdegree, MAdegree, nforecast=0, disp=False):
+    # Seasonal Autoregressive Integrated Moving-Average with eXogenous regressors (SARIMAX)
+    # see http://www.statsmodels.org/stable/statespace.html#seasonal-autoregressive-integrated-moving-average-with-exogenous-regressors-sarimax
+    Y = x.copy()
+    Y[p < pcutoff] = np.nan  # Set uncertain estimates to nan (modeled as missing data)
+    if np.sum(np.isfinite(Y)) > 10:
+        # SARIMAX implementation has better prediction models than simple ARIMAX (however we do not use the seasonal etc. parameters!)
+        mod = sm.tsa.statespace.SARIMAX(
+            Y.flatten(),
+            order=(ARdegree, 0, MAdegree),
+            seasonal_order=(0, 0, 0, 0),
+            simple_differencing=True,
+        )
+        # Autoregressive Moving Average ARMA(p,q) Model
+        # mod = sm.tsa.ARIMA(Y, order=(ARdegree,0,MAdegree)) #order=(ARdegree,0,MAdegree)
+        try:
+            res = mod.fit(disp=disp)
+        except (
+            ValueError
+        ):  # https://groups.google.com/forum/#!topic/pystatsmodels/S_Fo53F25Rk (let's update to statsmodels 0.10.0 soon...)
+            print('value error')
+            startvalues = np.array([convertparms2start(pn) for pn in mod.param_names])
+            res = mod.fit(start_params=startvalues, disp=disp)
+        except np.linalg.LinAlgError:
+            print('linalg')
+            # The process is not stationary, but the default SARIMAX model tries to solve for such a distribution...
+            # Relaxing those constraints should do the job.
+            mod = sm.tsa.statespace.SARIMAX(
+                Y.flatten(),
+                order=(ARdegree, 0, MAdegree),
+                seasonal_order=(0, 0, 0, 0),
+                simple_differencing=True,
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+                use_exact_diffuse=False,
+            )
+            res = mod.fit(disp=disp)
+
+        predict = res.get_prediction(end=mod.nobs + nforecast - 1)
+        return predict.predicted_mean, predict.conf_int(alpha=alpha)
+    else:
+        print('bad')
+        return np.nan * np.zeros(len(Y)), np.nan * np.zeros((len(Y), 2))
+
+def filter_pose_ar(config, points_full, scores_full):
+    n_frames, n_joints, n_possible, _ = points_full.shape
+
+    points = np.full((n_frames, n_joints, 2), np.nan, dtype='float64')
+    scores = np.empty((n_frames, n_joints), dtype='float64')
+
+    config_filter = config['filter']
+    for bp_ix in range(n_joints):
+        x = points_full[:, bp_ix, 0, 0]
+        y = points_full[:, bp_ix, 0, 1]
+        scores = scores_full[:, bp_ix, 0]
+
+        meanx, x_conf_int = FitSARIMAXModel(
+            x,
+            scores,
+            config_filter['score_threshold'],
+            config_filter['alpha'],
+            config_filter['ardegree'],
+            config_filter['madegree']
+        )
+
+        meany, y_conf_int = FitSARIMAXModel(
+            y,
+            scores,
+            config_filter['score_threshold'],
+            config_filter['alpha'],
+            config_filter['ardegree'],
+            config_filter['madegree']
+        )
+        meanx[0] = x[0]
+        meany[0] = y[0]
+        points[:, bp_ix, 0] = meanx
+        points[:, bp_ix, 1] = meany
+        # scores[:, bp_ix] = 
+    scores = scores_full[:, :, 0]
+    return points, scores
+
 def get_filter_poses(config, points_full, scores_full):
     filter_func = {
         'median': filter_pose_medfilt,
-        'viterbi': filter_pose_viterbi
+        'viterbi': filter_pose_viterbi,
+        'ar': filter_pose_ar,
     }
 
     return filter_func[config['filter']['type']](config, points_full, scores_full)

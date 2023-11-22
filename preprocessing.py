@@ -190,8 +190,16 @@ def load_cams_poses(analysis_files, calibration_file, show_world_frame = True, s
     
     return cam_params, tracks_2D
 
-def get_point_scores(analysis_file ):
+def get_point_scores(analysis_file):
     with h5py.File(analysis_file, 'r') as f:
         point_scores = f['point_scores'][:].T
 
+    # should be # frames x # bodyparts x # tracks
     return point_scores
+
+def get_bodyparts(analysis_file):
+    with h5py.File(analysis_file, 'r') as f:
+        bodyparts = f['node_names'][:]
+        bodyparts = [bp.decode('UTF-8') for bp in bodyparts]
+
+    return bodyparts

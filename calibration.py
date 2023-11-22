@@ -14,7 +14,7 @@ if spec is None:
 from aniposelib.boards import CharucoBoard, Checkerboard
 from aniposelib.cameras import CameraGroup
 
-def generate_calibration(config):
+def generate_calibration(config, calibration_folder):
 	"""
 	Generates calibration.toml file from videos in calibration folder.
 
@@ -22,10 +22,8 @@ def generate_calibration(config):
 		config: dictionary representing config.toml
 	"""
 
-	session_path = config['path']
 	config_calibration = config['calibration']
 
-	calibration_folder = session_path+'/../calibration'
 	calibration_toml_path = join(calibration_folder, 'calibration.toml')
 
 	# calibration.toml already exists! prompt user for replacement
@@ -48,11 +46,11 @@ def generate_calibration(config):
 	cam_videos = defaultdict(list)
 	cam_names = set()
 
-	cam_regex = re.compile(config_calibration['cam_regex'])
+	cam_regex = re.compile(config['cam_regex'])
 
 	# If user uses cam_naming, be case-insensitive
 	if 'cam_naming' in config_calibration:
-		cam_regex = re.compile(config_calibration['cam_regex'], re.IGNORECASE)
+		cam_regex = re.compile(config['cam_regex'], re.IGNORECASE)
 
 	# Extracting cam_names and building cam_videos
 	for video_file in video_files:

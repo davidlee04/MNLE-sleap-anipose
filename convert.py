@@ -5,15 +5,15 @@ from utils import get_files
 from io_sleap import convert
 from IPython.utils import io
 
-def convert_slp_to_h5(config):
+def convert_slp_to_h5(path):
 	"""Converts .slp files to .h5 files.
 
 	Args:
-		config: Dictionary representing config file
+		path: Session directory
 	"""
 
-	predictions_directory = join(config['path'], 'predictions')
-	predictions_h5_directory = join(config['path'], 'predictions_h5')
+	predictions_directory = join(path, 'predictions')
+	predictions_h5_directory = join(path, 'predictions_h5')
 	print(f'Converting {predictions_directory}')
 	print(f'Outputting to {predictions_h5_directory}')
 
